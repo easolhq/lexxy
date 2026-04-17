@@ -742,7 +742,7 @@ export class LexicalEditorElement extends HTMLElement {
   }
 
   #configureSanitizer(editor) {
-    setSanitizerConfig(this.#getAllowedElements(editor))
+    setSanitizerConfig(this.#getAllowedElements(editor), this.extensions.allowedStyles)
   }
 
   #getAllowedElements(editor) {
