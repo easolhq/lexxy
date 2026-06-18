@@ -1,5 +1,5 @@
 {
-  "name": "@37signals/lexxy",
+  "name": "@easolhq/lexxy",
   "version": "0.9.19-alpha.3",
   "description": "Lexxy - A modern rich text editor for Rails.",
   "module": "dist/lexxy.esm.js",
@@ -11,7 +11,10 @@
   "files": [
     "dist"
   ],
-  "repository": "https://github.com/basecamp/lexxy.git",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "repository": "https://github.com/easolhq/lexxy.git",
   "author": "Jorge Manrubia <jorge@37signals.com>",
   "license": "MIT",
   "browserslist": [
