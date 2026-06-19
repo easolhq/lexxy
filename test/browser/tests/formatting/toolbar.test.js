@@ -117,6 +117,90 @@ test.describe("Toolbar", () => {
     await expect(toolbar).not.toHaveAttribute("overflowing")
   })
 
+  test("requestOverflowRefresh() recalculates after a toolbar button is injected asynchronously", async ({ page }) => {
+    const toolbar = page.locator("lexxy-toolbar")
+    const overflowMenu = toolbar.locator(".lexxy-editor__toolbar-overflow-menu")
+
+    const originalSize = page.viewportSize()
+    await page.setViewportSize({ width: 300, height: originalSize.height })
+    await expect(toolbar).toHaveAttribute("overflowing", "")
+
+    // Simulate an extension that appends a toolbar button after overflow has
+    // already been computed, then asks the toolbar to recalculate.
+    await page.evaluate(async () => {
+      const tb = document.querySelector("lexxy-toolbar")
+      await new Promise((resolve) => requestAnimationFrame(resolve))
+      const button = document.createElement("button")
+      button.type = "button"
+      button.name = "async-injected"
+      button.className = "lexxy-editor__toolbar-button"
+      button.textContent = "X"
+      tb.insertBefore(button, tb.querySelector(".lexxy-editor__toolbar-overflow"))
+      tb.requestOverflowRefresh()
+      await new Promise((resolve) => requestAnimationFrame(resolve))
+    })
+
+    const injected = page.locator("button[name='async-injected']")
+    await expect(injected).toHaveCount(1)
+    // Reindex assigns a data-position so the button participates in subsequent
+    // reset/compact cycles instead of drifting to position 999.
+    await expect(injected).toHaveAttribute("data-position", /\d+/)
+    // No room at width=300, so the new button must end up in the overflow menu.
+    await expect(overflowMenu.locator("button[name='async-injected']")).toHaveCount(1)
+
+    // Restoring viewport pulls it back to the toolbar.
+    await page.setViewportSize(originalSize)
+    await expect(toolbar).not.toHaveAttribute("overflowing")
+    await expect(overflowMenu.locator("button[name='async-injected']")).toHaveCount(0)
+    await expect(toolbar.locator(":scope > button[name='async-injected']")).toHaveCount(1)
+  })
+
+  test("overflow compaction accounts for injected buttons that cannot overflow", async ({ page }) => {
+    const toolbar = page.locator("lexxy-toolbar")
+    const overflowMenu = toolbar.locator(".lexxy-editor__toolbar-overflow-menu")
+
+    const originalSize = page.viewportSize()
+    await page.setViewportSize({ width: 360, height: originalSize.height })
+
+    await page.evaluate(async () => {
+      const tb = document.querySelector("lexxy-toolbar")
+      const overflow = tb.querySelector(".lexxy-editor__toolbar-overflow")
+
+      for (const index of [ 1, 2 ]) {
+        const button = document.createElement("button")
+        button.type = "button"
+        button.name = `fixed-injected-${index}`
+        button.className = "lexxy-editor__toolbar-button"
+        button.dataset.preventOverflow = "true"
+        button.textContent = `${index}`
+        tb.insertBefore(button, overflow)
+      }
+
+      tb.requestOverflowRefresh()
+      await new Promise((resolve) => requestAnimationFrame(resolve))
+    })
+
+    await expect(toolbar).toHaveAttribute("overflowing", "")
+    await expect(overflowMenu.locator("button[name^='fixed-injected-']")).toHaveCount(0)
+
+    await expect.poll(async () => {
+      return await toolbar.evaluate((tb) => {
+        const toolbarRect = tb.getBoundingClientRect()
+        const style = window.getComputedStyle(tb)
+        const contentLeft = toolbarRect.left + parseFloat(style.paddingLeft)
+        const contentRight = toolbarRect.right - parseFloat(style.paddingRight)
+        const items = Array.from(tb.children).filter((item) => item.getClientRects().length > 0)
+
+        return items.every((item) => {
+          const rect = item.getBoundingClientRect()
+          return rect.left >= contentLeft && rect.right <= contentRight
+        })
+      })
+    }).toBe(true)
+
+    await page.setViewportSize(originalSize)
+  })
+
   test("image button opens file picker restricted to images and videos", async ({ page }) => {
     const [fileChooser] = await Promise.all([
       page.waitForEvent("filechooser"),

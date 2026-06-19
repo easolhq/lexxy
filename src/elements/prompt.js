@@ -1,17 +1,20 @@
 import Lexxy from "../config/lexxy"
 import { createElement, generateDomId, parseHtml } from "../helpers/html_helper"
 import { getNonce } from "../helpers/csp_helper"
-import { $createTextNode, $getSelection, $isRangeSelection, $isTextNode, COMMAND_PRIORITY_CRITICAL, KEY_ARROW_DOWN_COMMAND, KEY_ARROW_UP_COMMAND, KEY_ENTER_COMMAND, KEY_SPACE_COMMAND, KEY_TAB_COMMAND } from "lexical"
+import { $createTextNode, $getSelection, $isRangeSelection, $isTextNode, COMMAND_PRIORITY_CRITICAL, INPUT_COMMAND, KEY_ARROW_DOWN_COMMAND, KEY_ARROW_UP_COMMAND, KEY_ENTER_COMMAND, KEY_SPACE_COMMAND, KEY_TAB_COMMAND } from "lexical"
+import { $textBeforeOffset } from "../helpers/lexical_helper"
 import { CustomActionTextAttachmentNode } from "../nodes/custom_action_text_attachment_node"
 import InlinePromptSource from "../editor/prompt/inline_source"
 import DeferredPromptSource from "../editor/prompt/deferred_source"
 import RemoteFilterSource from "../editor/prompt/remote_filter_source"
-import { $generateNodesFromDOM } from "@lexical/html"
-import { debounce, nextFrame } from "../helpers/timing_helpers"
+import { debounce, nextFrame } from "../helpers/timing_helper"
 import { ListenerBin, registerEventListener } from "../helpers/listener_helper"
 
 const NOTHING_FOUND_DEFAULT_MESSAGE = "Nothing found"
 const FILTER_DEBOUNCE_INTERVAL = 50
+
+// Start of line, or after a space or newline.
+const DEFAULT_ONLY_AT_PATTERN = "^|[ \\n]"
 
 export class LexicalPromptElement extends HTMLElement {
   #globalListeners = new ListenerBin()
@@ -29,6 +32,7 @@ export class LexicalPromptElement extends HTMLElement {
     this.source = this.#createSource()
 
     this.#addTriggerListener()
+    this.#removePopoverBeforeTurboCaches()
     this.toggleAttribute("connected", true)
   }
 
@@ -36,7 +40,7 @@ export class LexicalPromptElement extends HTMLElement {
     this.#popoverListeners.dispose()
     this.#globalListeners.dispose()
     this.source = null
-    this.popoverElement = null
+    this.#removePopover()
   }
 
 
@@ -56,6 +60,14 @@ export class LexicalPromptElement extends HTMLElement {
 
   get supportsSpaceInSearches() {
     return this.hasAttribute("supports-space-in-searches")
+  }
+
+  get onlyAt() {
+    return this.getAttribute("only-at")
+  }
+
+  get verticalDirection() {
+    return this.getAttribute("vertical-direction")
   }
 
   get open() {
@@ -84,6 +96,8 @@ export class LexicalPromptElement extends HTMLElement {
   }
 
   #addTriggerListener() {
+    if (!this.#promptContentTypePermitted) return
+
     this.#popoverListeners.track(this.#editor.registerUpdateListener(({ editorState }) => {
       editorState.read(() => {
         if (this.#selection.isInsideCodeBlock) return
@@ -99,14 +113,10 @@ export class LexicalPromptElement extends HTMLElement {
           if (offset >= triggerLength) {
             const textBeforeCursor = fullText.slice(offset - triggerLength, offset)
 
-            // Check if trigger is at the start of the text node (new line case) or preceded by space or newline
             if (textBeforeCursor === this.trigger) {
-              const isAtStart = offset === triggerLength
+              const textBeforeTrigger = $textBeforeOffset(node, offset - triggerLength)
 
-              const charBeforeTrigger = offset > triggerLength ? fullText[offset - triggerLength - 1] : null
-              const isPrecededBySpaceOrNewline = charBeforeTrigger === " " || charBeforeTrigger === "\n"
-
-              if (isAtStart || isPrecededBySpaceOrNewline) {
+              if (this.#onlyAtRegExp.test(textBeforeTrigger)) {
                 this.#popoverListeners.dispose()
                 this.#showPopover()
               }
@@ -115,6 +125,27 @@ export class LexicalPromptElement extends HTMLElement {
         }
       })
     }))
+  }
+
+  get #onlyAtRegExp() {
+    return new RegExp(`(?:${this.onlyAt ?? DEFAULT_ONLY_AT_PATTERN})$`)
+  }
+
+  get #promptContentTypePermitted() {
+    // `insert-editable-text` prompts never create attachments, so the
+    // editor's attachment support and content-type allowlist don't apply.
+    if (this.hasAttribute("insert-editable-text")) return true
+
+    const el = this.#editorElement
+    if (!el.supportsAttachments) {
+      return false
+    } else {
+      const templates = Array.from(this.querySelectorAll("template[type='editor']"))
+      const types = templates.length
+        ? templates.map(t => t.getAttribute("content-type") || this.#defaultPromptContentType)
+        : [ this.#defaultPromptContentType ]
+      return types.some(t => el.permitsAttachmentContentType(t))
+    }
   }
 
   #addCursorPositionListener() {
@@ -190,6 +221,7 @@ export class LexicalPromptElement extends HTMLElement {
 
     if (this.#doesSpaceSelect) {
       this.#popoverListeners.track(this.#editor.registerCommand(KEY_SPACE_COMMAND, this.#handleSelectedOption.bind(this), COMMAND_PRIORITY_CRITICAL))
+      this.#popoverListeners.track(this.#editor.registerCommand(INPUT_COMMAND, this.#handleInputCommand.bind(this), COMMAND_PRIORITY_CRITICAL))
     }
 
     // Register arrow keys with CRITICAL priority to prevent Lexical's selection handlers from running
@@ -223,27 +255,33 @@ export class LexicalPromptElement extends HTMLElement {
     return Array.from(this.popoverElement.querySelectorAll(".lexxy-prompt-menu__item"))
   }
 
-  #selectOption(listItem) {
-    this.#clearSelection()
+  #selectOption(listItem, { scrollIntoView = false } = {}) {
+    this.#clearListItemSelection()
     listItem.toggleAttribute("aria-selected", true)
-    listItem.scrollIntoView({ block: "nearest", behavior: "smooth" })
-    listItem.focus()
+    if (scrollIntoView) {
+      listItem.scrollIntoView({ block: "nearest", container: "nearest", behavior: "smooth" })
+    }
 
-    // Preserve selection to prevent cursor jump
-    this.#selection.preservingSelection(() => {
-      this.#editorElement.focus()
-    })
+    this.#setEditorAssociationAttribute("aria-controls", this.popoverElement.id)
+    this.#setEditorAssociationAttribute("aria-activedescendant", listItem.id)
+    this.#setEditorAssociationAttribute("aria-haspopup", "listbox")
+  }
 
-    this.#editorContentElement.setAttribute("aria-controls", this.popoverElement.id)
-    this.#editorContentElement.setAttribute("aria-activedescendant", listItem.id)
-    this.#editorContentElement.setAttribute("aria-haspopup", "listbox")
+  #clearListItemSelection() {
+    this.#listItemElements.forEach((item) => { item.toggleAttribute("aria-selected", false) })
   }
 
   #clearSelection() {
-    this.#listItemElements.forEach((item) => { item.toggleAttribute("aria-selected", false) })
+    this.#clearListItemSelection()
     this.#editorContentElement.removeAttribute("aria-controls")
     this.#editorContentElement.removeAttribute("aria-activedescendant")
     this.#editorContentElement.removeAttribute("aria-haspopup")
+  }
+
+  #setEditorAssociationAttribute(name, value) {
+    if (this.#editorContentElement.getAttribute(name) !== value) {
+      this.#editorContentElement.setAttribute(name, value)
+    }
   }
 
   #positionPopover() {
@@ -260,11 +298,15 @@ export class LexicalPromptElement extends HTMLElement {
 
     const popoverRect = this.popoverElement.getBoundingClientRect()
 
-    if (popoverRect.right > window.innerWidth) {
+    if (popoverRect.right > editorRect.right) {
       this.popoverElement.toggleAttribute("data-clipped-at-right", true)
     }
 
-    if (popoverRect.bottom > window.innerHeight) {
+    const forceTop = this.verticalDirection === "top"
+    const forceBottom = this.verticalDirection === "bottom"
+    const overflowsWindow = popoverRect.bottom > window.innerHeight
+
+    if (!forceBottom && (forceTop || overflowsWindow)) {
       this.#setPopoverOffsetY(contentRect.height - y + fontSize)
       this.popoverElement.toggleAttribute("data-clipped-at-bottom", true)
     }
@@ -292,6 +334,21 @@ export class LexicalPromptElement extends HTMLElement {
 
     await nextFrame()
     this.#addTriggerListener()
+  }
+
+  // The popover is appended to the <lexxy-editor> subtree, so Turbo serializes it
+  // into the page cache. Removing it before caching prevents an orphaned, unmanaged
+  // popover from being restored on history back/forward.
+  #removePopoverBeforeTurboCaches() {
+    this.#globalListeners.track(
+      registerEventListener(document, "turbo:before-cache", () => this.#removePopover())
+    )
+  }
+
+  #removePopover() {
+    this.#popoverListeners.dispose()
+    this.popoverElement?.remove()
+    this.popoverElement = null
   }
 
   #filterOptions = async () => {
@@ -341,7 +398,7 @@ export class LexicalPromptElement extends HTMLElement {
 
   #showEmptyResults() {
     this.popoverElement.classList.add("lexxy-prompt-menu--empty")
-    const el = createElement("li", { innerHTML: this.#emptyResultsMessage })
+    const el = createElement("li", { textContent: this.#emptyResultsMessage })
     el.classList.add("lexxy-prompt-menu__item--empty")
     this.popoverElement.append(el)
   }
@@ -366,17 +423,22 @@ export class LexicalPromptElement extends HTMLElement {
         }
       })
     }
-    // Arrow keys are now handled via Lexical commands with HIGH priority
+    // Arrow keys are handled via Lexical commands
+  }
+
+  // Android Mobile keyboard doesn't trigger KEY_SPACE_COMMAND
+  #handleInputCommand(event) {
+    if (event.inputType === "insertText" && event.data === " ") return this.#handleSelectedOption(event)
   }
 
   #moveSelectionDown() {
     const nextIndex = this.#selectedIndex + 1
-    if (nextIndex < this.#listItemElements.length) this.#selectOption(this.#listItemElements[nextIndex])
+    if (nextIndex < this.#listItemElements.length) this.#selectOption(this.#listItemElements[nextIndex], { scrollIntoView: true })
   }
 
   #moveSelectionUp() {
     const previousIndex = this.#selectedIndex - 1
-    if (previousIndex >= 0) this.#selectOption(this.#listItemElements[previousIndex])
+    if (previousIndex >= 0) this.#selectOption(this.#listItemElements[previousIndex], { scrollIntoView: true })
   }
 
   get #selectedIndex() {
@@ -423,7 +485,7 @@ export class LexicalPromptElement extends HTMLElement {
   }
 
   #buildEditableTextNodes(template) {
-    return $generateNodesFromDOM(this.#editor, parseHtml(`${template.innerHTML}`))
+    return this.#editorElement.$generateNodesFromDOM(parseHtml(`${template.innerHTML}`))
   }
 
   #insertTemplatesAsAttachments(templates, stringToReplace, fallbackSgid = null) {
@@ -435,8 +497,10 @@ export class LexicalPromptElement extends HTMLElement {
   }
 
   #buildAttachmentNodes(templates, fallbackSgid = null) {
-    return templates.map(
-      template => this.#buildAttachmentNode(
+    return templates
+      .filter(template => this.#editorElement.permitsAttachmentContentType(
+        template.getAttribute("content-type") || this.#defaultPromptContentType))
+      .map(template => this.#buildAttachmentNode(
         template.innerHTML,
         template.getAttribute("content-type") || this.#defaultPromptContentType,
         template.getAttribute("sgid") || fallbackSgid

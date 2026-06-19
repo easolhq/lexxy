@@ -4,20 +4,18 @@ import {
   $isRangeSelection,
   $isTextNode,
   $setSelection,
-  COMMAND_PRIORITY_LOW,
   COMMAND_PRIORITY_NORMAL,
   FORMAT_TEXT_COMMAND,
   INDENT_CONTENT_COMMAND,
   KEY_ARROW_RIGHT_COMMAND,
   KEY_TAB_COMMAND,
   OUTDENT_CONTENT_COMMAND,
-  PASTE_COMMAND,
   REDO_COMMAND,
   UNDO_COMMAND
 } from "lexical"
 import { CodeNode } from "@lexical/code"
 import { $createAutoLinkNode, $toggleLink, LinkNode } from "@lexical/link"
-import { $getNearestNodeOfType } from "@lexical/utils"
+import { $getNearestNodeOfType, $insertNodeToNearestRoot } from "@lexical/utils"
 import { INSERT_TABLE_COMMAND } from "@lexical/table"
 
 import { createElement } from "../helpers/html_helper"
@@ -68,15 +66,10 @@ export class CommandDispatcher {
     this.editor = editorElement.editor
     this.selection = editorElement.selection
     this.contents = editorElement.contents
-    this.clipboard = editorElement.clipboard
 
     this.#registerCommands()
     this.#registerKeyboardCommands()
     this.#registerDragAndDropHandlers()
-  }
-
-  dispatchPaste(event) {
-    return this.clipboard.paste(event)
   }
 
   dispatchBold() {
@@ -232,8 +225,7 @@ export class CommandDispatcher {
   }
 
   dispatchInsertHorizontalDivider() {
-    this.contents.insertAtCursorEnsuringLineBelow(new HorizontalDividerNode())
-    this.editor.focus()
+    $insertNodeToNearestRoot(new HorizontalDividerNode)
   }
 
   dispatchSetFormatHeadingLarge() {
@@ -305,8 +297,6 @@ export class CommandDispatcher {
       const methodName = `dispatch${capitalize(command)}`
       this.#registerCommandHandler(command, 0, this[methodName].bind(this))
     }
-
-    this.#registerCommandHandler(PASTE_COMMAND, COMMAND_PRIORITY_LOW, this.dispatchPaste.bind(this))
   }
 
   #registerCommandHandler(command, priority, handler) {
@@ -335,12 +325,18 @@ export class CommandDispatcher {
   #registerDragAndDropHandlers() {
     if (this.editorElement.supportsAttachments) {
       this.dragCounter = 0
-      const root = this.editor.getRootElement()
       this.#listeners.track(
-        registerEventListener(root, "dragover", this.#handleDragOver.bind(this)),
-        registerEventListener(root, "drop", this.#handleDrop.bind(this)),
-        registerEventListener(root, "dragenter", this.#handleDragEnter.bind(this)),
-        registerEventListener(root, "dragleave", this.#handleDragLeave.bind(this))
+        this.editor.registerRootListener((rootElement) => {
+          if (rootElement) {
+            const teardowns = [
+              registerEventListener(rootElement, "dragover", this.#handleDragOver.bind(this)),
+              registerEventListener(rootElement, "drop", this.#handleDrop.bind(this)),
+              registerEventListener(rootElement, "dragenter", this.#handleDragEnter.bind(this)),
+              registerEventListener(rootElement, "dragleave", this.#handleDragLeave.bind(this))
+            ]
+            return () => teardowns.forEach((teardown) => teardown())
+          }
+        })
       )
     }
   }

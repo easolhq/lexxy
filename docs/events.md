@@ -1,7 +1,7 @@
 ---
 title: Events
 layout: default
-nav_order: 6
+nav_order: 7
 ---
 
 # Events
@@ -32,6 +32,7 @@ Fired when a file is dropped or inserted into the editor.
 
 - Access the file via `event.detail.file`.
 - Call `event.preventDefault()` to cancel the upload and prevent attaching the file.
+- Lexxy itself listens for this event to enforce `permittedAttachmentTypes` and will call `event.preventDefault()` for files whose MIME type is not in the allowlist.
 
 ## `lexxy:upload-start`
 

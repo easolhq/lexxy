@@ -33,4 +33,11 @@ export default class LexxyExtension {
   initializeToolbar(_lexxyToolbar) {
 
   }
+
+  setEditorValidity(flags, message) {
+    this.editorElement.setElementValidity(this, flags, message)
+  }
+
+  dispose() {
+  }
 }

@@ -84,7 +84,9 @@ test.describe("Attachments", () => {
   })
 
   test("upload previewable PDF shows file icon initially while preview loads", async ({ page, editor }) => {
-    await mockActiveStorageUploads(page)
+    // delayBlobResponses holds the preview URL so the file-icon state is
+    // observable before the preload completes and swaps in the preview.
+    await mockActiveStorageUploads(page, { delayBlobResponses: true })
     await editor.uploadFile("test/fixtures/files/dummy.pdf", { via: "file" })
 
     const figure = page.locator("figure.attachment[data-content-type='application/pdf']")
@@ -230,8 +232,8 @@ test.describe("Attachments", () => {
     // attachment so typing inserts text there. The trailing provisional paragraph
     // must be visible (not collapsed as hidden) so the caret renders correctly.
     const paragraphAfterAttachment = figure.locator("xpath=following-sibling::p[1]")
-    await expect(paragraphAfterAttachment).toHaveClass(/provisional-paragraph/)
-    await expect(paragraphAfterAttachment).not.toHaveClass(/hidden/)
+    await expect(paragraphAfterAttachment).toContainClass("provisional-paragraph")
+    await expect(paragraphAfterAttachment).not.toContainClass("hidden")
   })
 
   test("typing after uploading image into empty editor inserts text below the attachment", async ({ page, editor }) => {
@@ -256,13 +258,90 @@ test.describe("Attachments", () => {
     await expect(figure).toBeVisible({ timeout: 10_000 })
 
     await editor.send("hello")
-    await expect.poll(() => editor.plainTextValue()).toContain("hello")
+    const paragraph = figure.locator("xpath=following-sibling::p[1]")
+    await expect(paragraph).toHaveText("hello")
+
 
     await calls.releaseDirectUploadResponses()
     await editor.flush()
 
     await editor.send(" world")
-    await expect.poll(() => editor.plainTextValue()).toContain("hello world")
+    await expect(paragraph).toHaveText("hello world")
+  })
+
+  test("undo after uploading into empty editor restores empty state", async ({ page, editor }) => {
+    await mockActiveStorageUploads(page)
+    await editor.uploadFile("test/fixtures/files/example.png")
+
+    const figure = page.locator("figure.attachment")
+    await expect(figure).toBeVisible({ timeout: 10_000 })
+    await editor.flush()
+
+    // Wait for the history collapse to complete (runs in requestAnimationFrame)
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(resolve)))
+
+    // Undo until the undo button is disabled — no stale upload node should remain
+    const undoButton = page.getByRole("button", { name: "Undo" })
+    while (await undoButton.evaluate((el) => !el.disabled)) {
+      await undoButton.click()
+      await editor.flush()
+    }
+
+    await expect(figure).toHaveCount(0)
+    await expect(editor.content.locator("progress")).toHaveCount(0)
+  })
+
+  test("undo preserves edits made during upload", async ({ page, editor }) => {
+    await mockActiveStorageUploads(page, { uploadDelayMs: 1_000 })
+
+    await editor.uploadFile("test/fixtures/files/example.png")
+
+    const uploadProgress = page.locator("figure.attachment progress")
+    await expect(uploadProgress).toBeVisible({ timeout: 10_000 })
+
+    // Type while the upload node is still in-flight.
+    await editor.send("hello world")
+    await expect(uploadProgress).toBeVisible()
+
+    const figure = page.locator("figure.attachment")
+    await expect(figure.locator("img")).toHaveAttribute(
+      "src",
+      /\/rails\/active_storage\/blobs\/mock-signed-id-\d+\/example\.png/,
+      { timeout: 10_000 },
+    )
+    await editor.flush()
+
+    // Wait for the history collapse to complete
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(resolve)))
+
+    // Undo should remove the typed text but preserve the attachment
+    const undoButton = page.getByRole("button", { name: "Undo" })
+    await undoButton.click()
+    await editor.flush()
+
+    await expect(figure).toBeVisible()
+    await expect(editor.content).not.toContainText("hello world")
+  })
+
+  test("node selection does not create an extra undo step", async ({ page, editor }) => {
+    await mockActiveStorageUploads(page)
+    await editor.send("hello")
+    await editor.uploadFile("test/fixtures/files/example.png")
+
+    const figure = page.locator("figure.attachment[data-content-type='image/png']")
+    await expect(figure).toBeVisible({ timeout: 10_000 })
+    await editor.flush()
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(resolve)))
+
+    // Click to create a node selection, then undo should still remove the attachment.
+    await figure.locator("img").click()
+    await editor.flush()
+
+    await page.getByRole("button", { name: "Undo" }).click()
+    await editor.flush()
+
+    await expect(figure).toHaveCount(0)
+    await expect(editor.content).toContainText("hello")
   })
 
   test("Ctrl+C in caption copies text without losing focus", async ({ page, editor }) => {

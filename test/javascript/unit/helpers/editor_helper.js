@@ -1,4 +1,4 @@
-import { $getRoot } from "lexical"
+import { $getRoot, $isTextNode } from "lexical"
 import { defineElements } from "../../../../src/elements/index"
 import { NativeAdapter } from "../../../../src/editor/adapters/native_adapter"
 
@@ -33,6 +33,12 @@ export async function createTestEditor(options = {}) {
 
   if (options.value) {
     element.setAttribute("value", options.value)
+  }
+
+  if (options.attributes) {
+    for (const [ name, value ] of Object.entries(options.attributes)) {
+      element.setAttribute(name, value)
+    }
   }
 
   document.body.appendChild(element)
@@ -77,6 +83,21 @@ export function selectAll(editorElement) {
 export function selectEnd(editorElement) {
   editorElement.editor.update(() => {
     $getRoot().selectEnd()
+  })
+}
+
+export function selectFirstText(editorElement, offset = 0) {
+  editorElement.editor.update(() => {
+    const text = $getRoot().getFirstDescendant()
+    if ($isTextNode(text)) text.select(offset, offset)
+  }, { discrete: true })
+}
+
+// Mirrors LexicalToolbarElement#dispatchButtonCommand: toolbar buttons dispatch
+// their command from inside an editor.update() block.
+export function dispatchToolbarCommand(editorElement, command, payload) {
+  editorElement.editor.update(() => {
+    editorElement.editor.dispatchCommand(command, payload)
   })
 }
 

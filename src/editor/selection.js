@@ -1,18 +1,18 @@
 import {
-  $createParagraphNode, $getNearestNodeFromDOMNode, $getRoot, $getSelection, $isDecoratorNode, $isElementNode,
+  $addUpdateTag, $createParagraphNode, $getNearestNodeFromDOMNode, $getRoot, $getSelection, $isDecoratorNode, $isElementNode,
   $isLineBreakNode, $isNodeSelection, $isRangeSelection, $isTextNode, $setSelection, CLICK_COMMAND, COMMAND_PRIORITY_LOW, DELETE_CHARACTER_COMMAND,
-  KEY_ARROW_DOWN_COMMAND, KEY_ARROW_LEFT_COMMAND, KEY_ARROW_RIGHT_COMMAND, KEY_ARROW_UP_COMMAND, SELECTION_CHANGE_COMMAND, isDOMNode
+  HISTORY_MERGE_TAG, KEY_ARROW_DOWN_COMMAND, KEY_ARROW_LEFT_COMMAND, KEY_ARROW_RIGHT_COMMAND, KEY_ARROW_UP_COMMAND, SELECTION_CHANGE_COMMAND, isDOMNode
 } from "lexical"
 import { $getNearestNodeOfType } from "@lexical/utils"
 import { $getListDepth, ListItemNode, ListNode } from "@lexical/list"
 import { $getTableCellNodeFromLexicalNode, TableCellNode } from "@lexical/table"
 import { CodeNode } from "@lexical/code"
-import { nextFrame } from "../helpers/timing_helpers"
+import { nextFrame } from "../helpers/timing_helper"
 import { isSelectionHighlighted } from "../helpers/format_helper"
 import { getNonce } from "../helpers/csp_helper"
 import { $createNodeSelectionWith, $isListItemStructurallyEmpty, getListType } from "../helpers/lexical_helper"
 import { LinkNode } from "@lexical/link"
-import { $isHeadingNode, $isQuoteNode } from "@lexical/rich-text"
+import { $isHeadingNode, $isQuoteNode, QuoteNode } from "@lexical/rich-text"
 import { $isActionTextAttachmentNode } from "../nodes/action_text_attachment_node"
 import { ListenerBin, registerEventListener } from "../helpers/listener_helper"
 
@@ -29,12 +29,6 @@ export default class Selection {
     this.#processSelectionChangeCommands()
     this.#containEditorFocus()
     this.#clearStaleInlineCodeFormat()
-  }
-
-  set current(selection) {
-    this.editor.update(() => {
-      this.#syncSelectedClasses()
-    })
   }
 
   get hasNodeSelection() {
@@ -91,32 +85,6 @@ export default class Selection {
     }
 
     return { node: null, offset: 0 }
-  }
-
-  preservingSelection(fn) {
-    let selectionState = null
-
-    this.editor.getEditorState().read(() => {
-      const selection = $getSelection()
-      if (selection && $isRangeSelection(selection)) {
-        selectionState = {
-          anchor: { key: selection.anchor.key, offset: selection.anchor.offset },
-          focus: { key: selection.focus.key, offset: selection.focus.offset }
-        }
-      }
-    })
-
-    fn()
-
-    if (selectionState) {
-      this.editor.update(() => {
-        const selection = $getSelection()
-        if (selection && $isRangeSelection(selection)) {
-          selection.anchor.set(selectionState.anchor.key, selectionState.anchor.offset, "text")
-          selection.focus.set(selectionState.focus.key, selectionState.focus.offset, "text")
-        }
-      })
-    }
   }
 
   getFormat() {
@@ -191,6 +159,10 @@ export default class Selection {
     return this.nearestNodeOfType(ListItemNode)
   }
 
+  get isInsideBlockQuote() {
+    return this.nearestNodeOfType(QuoteNode)
+  }
+
   get isIndentedList() {
     const closestListNode = this.nearestNodeOfType(ListNode)
     return closestListNode && ($getListDepth(closestListNode) > 1)
@@ -209,9 +181,17 @@ export default class Selection {
   }
 
   get isOnPreviewableImage() {
-    const selection = $getSelection()
-    const firstNode = selection?.getNodes().at(0)
-    return $isActionTextAttachmentNode(firstNode) && firstNode.isPreviewableImage
+    return this.previewableImageNode != null
+  }
+
+  get previewableImageNode() {
+    const firstNode = $getSelection()?.getNodes().at(0)
+    return $isActionTextAttachmentNode(firstNode) && firstNode.isPreviewableImage ? firstNode : null
+  }
+
+  get isAtNodeStart() {
+    const { anchorNode, offset } = this.#getCollapsedSelectionData()
+    return anchorNode && offset === 0
   }
 
   get nodeAfterCursor() {
@@ -365,7 +345,7 @@ export default class Selection {
       this.editor.registerCommand(DELETE_CHARACTER_COMMAND, this.#selectDecoratorNodeBeforeDeletion.bind(this), COMMAND_PRIORITY_LOW),
 
       this.editor.registerCommand(SELECTION_CHANGE_COMMAND, () => {
-        this.current = $getSelection()
+        this.#syncSelectedClasses()
       }, COMMAND_PRIORITY_LOW)
     )
   }
@@ -378,46 +358,59 @@ export default class Selection {
       return $isDecoratorNode(targetNode) && this.#selectInLexical(targetNode)
     }, COMMAND_PRIORITY_LOW))
 
-    const rootElement = this.editor.getRootElement()
     this.#listeners.track(
-      registerEventListener(rootElement, "lexxy:internal:move-to-next-line", () => this.#selectOrAppendNextLine())
+      this.editor.registerRootListener((rootElement) => {
+        if (rootElement) {
+          return registerEventListener(rootElement, "lexxy:internal:move-to-next-line", () => this.#selectOrAppendNextLine())
+        }
+      })
     )
   }
 
   #containEditorFocus() {
     // Workaround for a bizarre Chrome bug where the cursor abandons the editor to focus on not-focusable elements
     // above when navigating UP/DOWN when Lexical shows its fake cursor on custom decorator nodes.
-    this.editorContentElement.addEventListener("keydown", (event) => {
-      if (event.key === "ArrowUp") {
-        const lexicalCursor = this.editor.getRootElement().querySelector("[data-lexical-cursor]")
+    this.#listeners.track(
+      this.editor.registerRootListener((rootElement) => {
+        if (rootElement) {
+          const handler = (event) => this.#handleArrowKeyOnLexicalCursor(event)
+          rootElement.addEventListener("keydown", handler, true)
+          return () => rootElement.removeEventListener("keydown", handler, true)
+        }
+      })
+    )
+  }
 
-        if (lexicalCursor) {
-          let currentElement = lexicalCursor.previousElementSibling
-          while (currentElement && currentElement.hasAttribute("data-lexical-cursor")) {
-            currentElement = currentElement.previousElementSibling
-          }
+  #handleArrowKeyOnLexicalCursor(event) {
+    if (event.key === "ArrowUp") {
+      const lexicalCursor = this.editor.getRootElement().querySelector("[data-lexical-cursor]")
 
-          if (!currentElement) {
-            event.preventDefault()
-          }
+      if (lexicalCursor) {
+        let currentElement = lexicalCursor.previousElementSibling
+        while (currentElement && currentElement.hasAttribute("data-lexical-cursor")) {
+          currentElement = currentElement.previousElementSibling
+        }
+
+        if (!currentElement) {
+          event.preventDefault()
         }
       }
+    }
 
-      if (event.key === "ArrowDown") {
-        const lexicalCursor = this.editor.getRootElement().querySelector("[data-lexical-cursor]")
+    if (event.key === "ArrowDown") {
+      const lexicalCursor = this.editor.getRootElement().querySelector("[data-lexical-cursor]")
 
-        if (lexicalCursor) {
-          let currentElement = lexicalCursor.nextElementSibling
-          while (currentElement && currentElement.hasAttribute("data-lexical-cursor")) {
-            currentElement = currentElement.nextElementSibling
-          }
+      if (lexicalCursor) {
+        let currentElement = lexicalCursor.nextElementSibling
+        while (currentElement && currentElement.hasAttribute("data-lexical-cursor")) {
+          currentElement = currentElement.nextElementSibling
+        }
 
-          if (!currentElement) {
-            event.preventDefault()
-          }
+        if (!currentElement) {
+          event.preventDefault()
         }
       }
-    }, true)
+    }
   }
 
   #syncSelectedClasses() {
@@ -563,6 +556,7 @@ export default class Selection {
 
   #selectInLexical(node) {
     if ($isDecoratorNode(node)) {
+      $addUpdateTag(HISTORY_MERGE_TAG)
       const selection = $createNodeSelectionWith(node)
       $setSelection(selection)
       return selection
@@ -596,6 +590,9 @@ export default class Selection {
   // - First item (no previous sibling): convert to a paragraph above the
   //   list, matching the standard "unwrap list formatting" behavior that
   //   users expect from pressing backspace at the start of a list item.
+  //   Inside a blockquote we instead just remove the empty item and move
+  //   the cursor into the next one — stranding a paragraph there would
+  //   leave the blank line the user is trying to close.
   //
   // When the empty item is the last/only one in the list, we return false
   // and let Lexical's default (convert to paragraph) provide the standard
@@ -614,19 +611,22 @@ export default class Selection {
     if (!nextSibling) return false
 
     const previousSibling = listItem.getPreviousSibling()
-    if (previousSibling) {
-      previousSibling.selectEnd()
-      listItem.remove()
-      return true
-    }
-
     const listNode = $getNearestNodeOfType(listItem, ListNode)
     if (!listNode) return false
 
-    const paragraph = $createParagraphNode()
-    listNode.insertBefore(paragraph)
-    listItem.remove()
-    paragraph.selectStart()
+    if (previousSibling) {
+      previousSibling.selectEnd()
+      listItem.remove()
+    } else if ($isQuoteNode(listNode.getParent())) {
+      nextSibling.selectStart()
+      listItem.remove()
+    } else {
+      const paragraph = $createParagraphNode()
+      listNode.insertBefore(paragraph)
+      listItem.remove()
+      paragraph.selectStart()
+    }
+
     return true
   }
 

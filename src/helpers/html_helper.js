@@ -1,7 +1,9 @@
 export function createElement(name, properties, content = "") {
   const element = document.createElement(name)
   for (const [ key, value ] of Object.entries(properties || {})) {
-    if (key in element) {
+    if (key === "dataset") {
+      Object.entries(value).forEach(([ key, value ]) => (element.dataset[key] = value))
+    } else if (key in element) {
       element[key] = value
     } else if (value !== null && value !== undefined) {
       element.setAttribute(key, value)
@@ -61,5 +63,18 @@ export function extractPlainTextFromHtml(innerHtml = "") {
 }
 
 export function isActiveAndVisible(element) {
-  return element && !element.disabled && element.checkVisibility()
+  return element && !element.disabled && checkVisibility(element)
+}
+
+// no `checkVisibility` in Safari < 17.4
+// https://developer.mozilla.org/en-US/docs/Web/API/Element/checkVisibility#browser_compatibility
+function checkVisibility(element, options) {
+  if (element.checkVisibility) {
+    return element.checkVisibility(options)
+  } else {
+    if (options) throw new Error("Polyfilled checkVisibility does not support options")
+    // Will not work for body or a fixed position element child of the body
+    // which is OK since that doesn't apply in the toolbar where this is used
+    return Boolean(element.offsetParent)
+  }
 }

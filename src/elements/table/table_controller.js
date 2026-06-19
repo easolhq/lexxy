@@ -19,7 +19,7 @@ import {
 } from "@lexical/table"
 
 import { upcaseFirst } from "../../helpers/string_helper"
-import { nextFrame } from "../../helpers/timing_helpers"
+import { nextFrame } from "../../helpers/timing_helper"
 import { ListenerBin } from "../../helpers/listener_helper"
 
 export class TableController {
@@ -123,6 +123,8 @@ export class TableController {
 
     this.currentCellKey = cellNode?.getKey() ?? null
     this.currentTableNodeKey = tableNode?.getKey() ?? null
+
+    return tableNode
   }
 
   executeTableCommand(command, customIndex = null) {
