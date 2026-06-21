@@ -7,6 +7,7 @@ import { $createTextNode, $getSelection, $isParagraphNode, $isRangeSelection, $o
 import { $insertDataTransferForRichText } from "@lexical/clipboard"
 import { $createLinkNode, $isLinkNode, $toggleLink } from "@lexical/link"
 import { ListenerBin } from "../helpers/listener_helper"
+import NodeInserter from "./contents/node_inserter"
 
 export default class Clipboard {
   #listeners = new ListenerBin()
@@ -144,7 +145,7 @@ export default class Clipboard {
     }
 
     const linkNode = $createLinkNode(url).append($createTextNode(url))
-    selection.insertNodes([ linkNode ])
+    NodeInserter.for(selection).insertNodes([ linkNode ])
 
     $onUpdate(() => this.#dispatchLinkInsertEvent(linkNode.getKey(), { url }))
   }
@@ -164,14 +165,31 @@ export default class Clipboard {
   #pasteMarkdown(text) {
     const html = marked(text, { breaks: true })
     const doc = parseHtml(html)
-    const detail = Object.freeze({
-      markdown: text,
-      document: doc,
-      addBlockSpacing: () => addBlockSpacing(doc)
-    })
 
-    dispatch(this.editorElement, "lexxy:insert-markdown", detail)
-    this.contents.insertDOM(doc, { tag: PASTE_TAG })
+    if (this.#isPlainTextWithoutMarkdown(doc)) {
+      this.contents.insertText(text, { tag: PASTE_TAG })
+    } else {
+      const detail = Object.freeze({
+        markdown: text,
+        document: doc,
+        addBlockSpacing: () => addBlockSpacing(doc)
+      })
+
+      dispatch(this.editorElement, "lexxy:insert-markdown", detail)
+      this.contents.insertDOM(doc, { tag: PASTE_TAG })
+    }
+  }
+
+  // Markdown conversion collapses runs of whitespace and unescapes backslashes,
+  // silently corrupting plain text such as Windows/UNC file paths. When the text
+  // carries no Markdown structure, paste it verbatim instead.
+  #isPlainTextWithoutMarkdown(doc) {
+    const elements = Array.from(doc.body.children)
+    if (elements.length !== 1) return false
+
+    const paragraph = elements[0]
+    return paragraph.nodeName === "P"
+      && Array.from(paragraph.childNodes).every((node) => node.nodeType === Node.TEXT_NODE)
   }
 
   #pasteRichText(clipboardData) {
