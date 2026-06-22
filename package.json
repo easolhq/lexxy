@@ -1,6 +1,6 @@
 {
   "name": "@easolhq/lexxy",
-  "version": "0.9.19-alpha.3-easol.1",
+  "version": "0.9.19-easol.1",
   "description": "Lexxy - A modern rich text editor for Rails.",
   "module": "dist/lexxy.esm.js",
   "type": "module",
